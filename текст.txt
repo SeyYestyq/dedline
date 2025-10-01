@@ -1,0 +1,1024 @@
+ Полная инструкция по реализации Telegram Mini App с дедлайнами (БЕЗ регистрации)
+📋 Архитектура проекта
+project/
+├── backend/                 # Python FastAPI
+│   ├── main.py             # API сервер
+│   ├── database.py         # Подключение к PostgreSQL
+│   ├── bot.py              # Telegram бот
+│   ├── requirements.txt
+│   └── .env
+├── frontend/               # React + Vite
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── App.css
+│   │   └── main.jsx
+│   ├── index.html
+│   └── package.json
+└── sql/
+    └── init.sql            # Схема БД
+
+🛠️ Технологический стек
+Backend:
+
+Python 3.10+ - язык программирования
+FastAPI - современный веб-фреймворк
+PostgreSQL - база данных
+psycopg2 - PostgreSQL драйвер
+python-telegram-bot - библиотека для бота
+uvicorn - ASGI сервер
+
+Frontend:
+
+React 18 - UI библиотека
+Vite - сборщик
+Telegram WebApp SDK - интеграция с Telegram
+
+Деплой:
+
+Railway/Render - хостинг backend + PostgreSQL (бесплатно)
+Vercel/Netlify - хостинг frontend (бесплатно)
+
+
+📦 Шаг 1: Настройка окружения (30 минут)
+1.1 Создание Telegram бота
+bash# 1. Открыть @BotFather в Telegram
+# 2. Отправить /newbot
+# 3. Указать имя бота
+# 4. Получить токен (сохранить!)
+# 5. Настроить команды: /setcommands
+start - Открыть приложение с дедлайнами
+stats - Показать статистику
+1.2 Установка зависимостей
+bash# Создать директорию проекта
+mkdir telegram-deadlines && cd telegram-deadlines
+
+# Backend
+mkdir backend && cd backend
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Установить пакеты
+pip install fastapi uvicorn psycopg2-binary python-telegram-bot python-dotenv
+pip freeze > requirements.txt
+
+# Frontend
+cd ..
+npm create vite@latest frontend -- --template react
+cd frontend
+npm install @twa-dev/sdk
+
+🗄️ Шаг 2: Создание базы данных (1 час)
+2.1 SQL схема
+sql-- sql/init.sql
+CREATE TABLE tasks (
+    id SERIAL PRIMARY KEY,
+    telegram_id BIGINT NOT NULL,
+    subject VARCHAR(255) NOT NULL,
+    task_type VARCHAR(100) NOT NULL,
+    task_number VARCHAR(50),
+    points INTEGER,
+    deadline_start DATE NOT NULL,
+    deadline_end DATE NOT NULL,
+    description TEXT,
+    first_reminder DATE NOT NULL,
+    second_reminder DATE NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_tasks_user_deadline ON tasks(telegram_id, deadline_end);
+CREATE INDEX idx_tasks_reminders ON tasks(first_reminder, second_reminder);
+CREATE INDEX idx_tasks_status ON tasks(status);
+2.2 Загрузка данных
+python# backend/load_data.py
+import psycopg2
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def load_tasks(telegram_id):
+    conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+    cur = conn.cursor()
+    
+    tasks = [
+        # Все 46 задач из вашего расписания
+        (telegram_id, 'Базы данных для решения промышленных задач', 'Контрольная работа', '1', 4, '2025-09-01', '2025-09-30', 'по заданию практической работы №3', '2025-08-17', '2025-09-25'),
+        # ... (остальные задачи из предыдущего ответа)
+    ]
+    
+    for task in tasks:
+        cur.execute("""
+            INSERT INTO tasks (telegram_id, subject, task_type, task_number, points, 
+                             deadline_start, deadline_end, description, 
+                             first_reminder, second_reminder)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, task)
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"✅ Загружено {len(tasks)} задач")
+
+if __name__ == "__main__":
+    # Замените на ваш Telegram ID
+    load_tasks(YOUR_TELEGRAM_ID)
+
+🐍 Шаг 3: Backend API (2-3 дня)
+3.1 Конфигурация
+python# backend/.env
+BOT_TOKEN=your_bot_token_here
+DATABASE_URL=postgresql://user:password@localhost:5432/telegram_tasks
+WEB_APP_URL=https://your-app.vercel.app
+3.2 Подключение к БД
+python# backend/database.py
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def get_db():
+    return psycopg2.connect(
+        os.getenv('DATABASE_URL'),
+        cursor_factory=RealDictCursor
+    )
+3.3 FastAPI сервер
+python# backend/main.py
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, date
+from database import get_db
+
+app = FastAPI()
+
+# CORS для Telegram WebApp
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/api/tasks/{telegram_id}")
+async def get_tasks(telegram_id: int):
+    """Получить задачи с категоризацией"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT * FROM tasks 
+        WHERE telegram_id = %s AND status = 'pending'
+        ORDER BY deadline_end ASC
+    """, (telegram_id,))
+    
+    tasks = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    # Категоризация
+    now = date.today()
+    urgent, current, upcoming = [], [], []
+    
+    for task in tasks:
+        days_left = (task['deadline_end'] - now).days
+        task['days_left'] = days_left
+        
+        task_name = task['task_type']
+        if task['task_number']:
+            task_name += f" {task['task_number']}"
+        if task['points']:
+            task_name += f" ({task['points']} б.)"
+        task['formatted_name'] = task_name
+        
+        if days_left < 0 or days_left <= 7:
+            task['urgency'] = 'overdue' if days_left < 0 else 'urgent'
+            urgent.append(task)
+        elif days_left <= 21:
+            task['urgency'] = 'current'
+            current.append(task)
+        else:
+            task['urgency'] = 'upcoming'
+            upcoming.append(task)
+    
+    return {'urgent': urgent, 'current': current, 'upcoming': upcoming}
+
+@app.patch("/api/tasks/{task_id}/complete")
+async def complete_task(task_id: int):
+    """Отметить задачу выполненной"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("UPDATE tasks SET status = 'completed' WHERE id = %s", (task_id,))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {"message": "Задача выполнена"}
+
+@app.get("/api/subjects/{telegram_id}")
+async def get_subjects(telegram_id: int):
+    """Статистика по предметам"""
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT 
+            subject,
+            COUNT(*) as total_tasks,
+            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+            SUM(points) as total_points,
+            MIN(deadline_end) as nearest_deadline
+        FROM tasks 
+        WHERE telegram_id = %s
+        GROUP BY subject
+        ORDER BY nearest_deadline ASC
+    """, (telegram_id,))
+    
+    subjects = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    return {'subjects': subjects}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+3.4 Telegram бот
+python# backend/bot.py
+import asyncio
+from datetime import date
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import Application, CommandHandler
+from database import get_db
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+WEB_APP_URL = os.getenv('WEB_APP_URL')
+
+async def start(update, context):
+    """Команда /start"""
+    keyboard = [[
+        InlineKeyboardButton(
+            "📚 Открыть дедлайны", 
+            web_app=WebAppInfo(url=WEB_APP_URL)
+        )
+    ]]
+    
+    await update.message.reply_text(
+        "👋 Привет! Нажми кнопку ниже, чтобы открыть свои дедлайны:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def stats(update, context):
+    """Команда /stats"""
+    user_id = update.effective_user.id
+    
+    conn = get_db()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending
+        FROM tasks WHERE telegram_id = %s
+    """, (user_id,))
+    
+    stats = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    await update.message.reply_text(
+        f"📊 Статистика:\n\n"
+        f"📚 Всего: {stats['total']}\n"
+        f"✅ Выполнено: {stats['completed']}\n"
+        f"⏳ Осталось: {stats['pending']}"
+    )
+
+async def check_reminders():
+    """Проверка напоминаний ежедневно"""
+    bot = Bot(token=BOT_TOKEN)
+    
+    while True:
+        try:
+            today = date.today()
+            conn = get_db()
+            cur = conn.cursor()
+            
+            cur.execute("""
+                SELECT DISTINCT telegram_id, subject, task_type, task_number, 
+                       points, deadline_end
+                FROM tasks 
+                WHERE status = 'pending'
+                AND (first_reminder = %s OR second_reminder = %s)
+            """, (today, today))
+            
+            reminders = cur.fetchall()
+            
+            for task in reminders:
+                days_left = (task['deadline_end'] - today).days
+                task_name = task['task_type']
+                if task['task_number']:
+                    task_name += f" {task['task_number']}"
+                
+                await bot.send_message(
+                    chat_id=task['telegram_id'],
+                    text=f"🔔 Напоминание!\n\n"
+                         f"📚 {task['subject']}\n"
+                         f"📝 {task_name}\n"
+                         f"⏰ Дедлайн через {days_left} дн."
+                )
+            
+            cur.close()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Ошибка: {e}")
+        
+        await asyncio.sleep(86400)  # 24 часа
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    
+    # Запуск напоминаний в фоне
+    asyncio.create_task(check_reminders())
+    
+    print("🤖 Бот запущен!")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+Шаг 4: Frontend (2-3 дня)
+4.1 Главный компонент
+Используйте полный код App.jsx
+// App.jsx
+import { useEffect, useState } from 'react';
+import WebApp from '@twa-dev/sdk';
+import './App.css';
+
+function App() {
+    const [tasks, setTasks] = useState({
+        urgent: [],
+        current: [],
+        upcoming: []
+    });
+    const [subjects, setSubjects] = useState([]);
+    const [userId, setUserId] = useState(null);
+    const [activeView, setActiveView] = useState('tasks'); // tasks или subjects
+
+    useEffect(() => {
+        WebApp.ready();
+        WebApp.expand();
+        
+        const tgUser = WebApp.initDataUnsafe.user;
+        setUserId(tgUser?.id);
+        
+        if (tgUser?.id) {
+            loadTasks(tgUser.id);
+            loadSubjects(tgUser.id);
+        }
+    }, []);
+
+    const loadTasks = async (telegramId) => {
+        const response = await fetch(`http://localhost:8000/api/tasks/${telegramId}`);
+        const data = await response.json();
+        setTasks(data);
+    };
+
+    const loadSubjects = async (telegramId) => {
+       const response = await fetch(`http://localhost:8000/api/subjects/${telegramId}`);
+        const data = await response.json();
+        setSubjects(data.subjects);
+    };
+
+    const completeTask = async (taskId) => {
+        await fetch(`http://localhost:8000/api/tasks/${taskId}/complete`, {
+            method: 'PATCH'
+        });
+        loadTasks(userId);
+        loadSubjects(userId);
+    };
+
+    const TaskCard = ({ task }) => {
+        const formatDate = (date) => {
+            return new Date(date).toLocaleDateString('ru-RU', {
+                day: 'numeric',
+                month: 'long'
+            });
+        };
+
+        const getUrgencyColor = () => {
+            if (task.urgency === 'overdue') return '#ff0000';
+            if (task.urgency === 'urgent') return '#ff6b6b';
+            return '#666';
+        };
+
+        return (
+            <div className="task-card" style={{ borderLeftColor: getUrgencyColor() }}>
+                <div className="task-header">
+                    <h4>{task.subject}</h4>
+                    <span className="points">{task.points ? `${task.points} б.` : ''}</span>
+                </div>
+                
+                <div className="task-info">
+                    <p className="task-name">{task.formatted_name}</p>
+                    {task.description && (
+                        <p className="task-description">{task.description}</p>
+                    )}
+                </div>
+
+                <div className="task-footer">
+                    <div className="deadline-info">
+                        <span className="date">
+                            📅 {formatDate(task.deadline_start)} — {formatDate(task.deadline_end)}
+                        </span>
+                        <span className={`days-left ${task.urgency}`}>
+                            {task.days_left >= 0 
+                                ? `Осталось ${task.days_left} дн.` 
+                                : `Просрочено на ${Math.abs(task.days_left)} дн.`}
+                        </span>
+                    </div>
+                    
+                    <button 
+                        className="complete-btn"
+                        onClick={() => completeTask(task.id)}
+                    >
+                        ✅ Выполнено
+                    </button>
+                </div>
+
+                {task.first_reminder && (
+                    <div className="reminders">
+                        <small>
+                            🔔 Напоминания: {formatDate(task.first_reminder)} и {formatDate(task.second_reminder)}
+                        </small>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const SubjectCard = ({ subject }) => {
+        const progress = subject.total_tasks > 0 
+            ? (subject.completed / subject.total_tasks * 100).toFixed(0) 
+            : 0;
+
+        return (
+            <div className="subject-card">
+                <h4>{subject.subject}</h4>
+                <div className="subject-stats">
+                    <div className="stat">
+                        <span className="stat-value">{subject.pending}</span>
+                        <span className="stat-label">Осталось</span>
+                    </div>
+                    <div className="stat">
+                        <span className="stat-value">{subject.completed}</span>
+                        <span className="stat-label">Выполнено</span>
+                    </div>
+                    <div className="stat">
+                        <span className="stat-value">{subject.total_points || 0}</span>
+                        <span className="stat-label">Баллов</span>
+                    </div>
+                </div>
+                
+                <div className="progress-bar">
+                    <div 
+                        className="progress-fill" 
+                        style={{ width: `${progress}%` }}
+                    />
+                </div>
+                <p className="progress-text">{progress}% выполнено</p>
+                
+                {subject.nearest_deadline && (
+                    <p className="next-deadline">
+                        Ближайший дедлайн: {new Date(subject.nearest_deadline).toLocaleDateString('ru-RU')}
+                    </p>
+                )}
+            </div>
+        );
+    };
+
+    return (
+        <div className="app">
+            <header className="app-header">
+                <h1>📚 Мои дедлайны</h1>
+                <div className="view-toggle">
+                    <button 
+                        className={activeView === 'tasks' ? 'active' : ''}
+                        onClick={() => setActiveView('tasks')}
+                    >
+                        Задачи
+                    </button>
+                    <button 
+                        className={activeView === 'subjects' ? 'active' : ''}
+                        onClick={() => setActiveView('subjects')}
+                    >
+                        Предметы
+                    </button>
+                </div>
+            </header>
+
+            {activeView === 'tasks' ? (
+                <div className="tasks-view">
+                    {/* СРОЧНЫЕ ЗАДАЧИ */}
+                    <section className="section urgent-section">
+                        <div className="section-header">
+                            <h2>🔥 Срочно</h2>
+                            <span className="badge">{tasks.urgent.length}</span>
+                        </div>
+                        {tasks.urgent.length === 0 ? (
+                            <p className="empty-state">🎉 Срочных задач нет!</p>
+                        ) : (
+                            <div className="tasks-list">
+                                {tasks.urgent.map(task => (
+                                    <TaskCard key={task.id} task={task} />
+                                ))}
+                            </div>
+                        )}
+                    </section>
+
+                    {/* ТЕКУЩИЕ ЗАДАЧИ */}
+                    <section className="section current-section">
+                        <div className="section-header">
+                            <h2>⏰ Текущие</h2>
+                            <span className="badge">{tasks.current.length}</span>
+                        </div>
+                        {tasks.current.length === 0 ? (
+                            <p className="empty-state">Текущих задач нет</p>
+                        ) : (
+                            <div className="tasks-list">
+                                {tasks.current.map(task => (
+                                    <TaskCard key={task.id} task={task} />
+                                ))}
+                            </div>
+                        )}
+                    </section>
+
+                    {/* БУДУЩИЕ ЗАДАЧИ */}
+                    <section className="section upcoming-section">
+                        <div className="section-header">
+                            <h2>📅 Скоро</h2>
+                            <span className="badge">{tasks.upcoming.length}</span>
+                        </div>
+                        {tasks.upcoming.length === 0 ? (
+                            <p className="empty-state">Будущих задач нет</p>
+                        ) : (
+                            <div className="tasks-list">
+                                {tasks.upcoming.map(task => (
+                                    <TaskCard key={task.id} task={task} />
+                                ))}
+                            </div>
+                        )}
+                    </section>
+                </div>
+            ) : (
+                <div className="subjects-view">
+                    <div className="subjects-list">
+                        {subjects.map((subject, index) => (
+                            <SubjectCard key={index} subject={subject} />
+                        ))}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+export default App;
+
+4.2 Стили
+Используйте полный CSS:
+/* App.css */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f5f5f5;
+}
+
+.app {
+    max-width: 800px;
+    margin: 0 auto;
+    padding-bottom: 20px;
+}
+
+/* HEADER */
+.app-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 20px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.app-header h1 {
+    font-size: 24px;
+    margin-bottom: 15px;
+}
+
+.view-toggle {
+    display: flex;
+    gap: 10px;
+}
+
+.view-toggle button {
+    flex: 1;
+    padding: 10px;
+    border: 2px solid rgba(255,255,255,0.3);
+    background: rgba(255,255,255,0.1);
+    color: white;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.view-toggle button.active {
+    background: white;
+    color: #667eea;
+}
+
+/* SECTIONS */
+.section {
+    margin: 20px 15px;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.section-header h2 {
+    font-size: 20px;
+    color: #333;
+}
+
+.badge {
+    background: #667eea;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.urgent-section .badge {
+    background: #ff4444;
+}
+
+.current-section .badge {
+    background: #ffa500;
+}
+
+.upcoming-section .badge {
+    background: #4499ff;
+}
+
+/* TASK CARDS */
+.tasks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.task-card {
+    background: white;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    border-left: 4px solid #667eea;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.task-card:active {
+    transform: scale(0.98);
+}
+
+.task-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    margin-bottom: 12px;
+}
+
+.task-header h4 {
+    font-size: 14px;
+    color: #667eea;
+    font-weight: 600;
+    line-height: 1.4;
+    flex: 1;
+}
+
+.points {
+    background: #f0f0f0;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: bold;
+    color: #666;
+    white-space: nowrap;
+    margin-left: 8px;
+}
+
+.task-info {
+    margin-bottom: 12px;
+}
+
+.task-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 8px;
+}
+
+.task-description {
+    font-size: 13px;
+    color: #666;
+    line-height: 1.5;
+}
+
+.task-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    gap: 10px;
+}
+
+.deadline-info {
+    flex: 1;
+}
+
+.date {
+    display: block;
+    font-size: 13px;
+    color: #666;
+    margin-bottom: 4px;
+}
+
+.days-left {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 3px 8px;
+    border-radius: 4px;
+}
+
+.days-left.urgent {
+    background: #ffe5e5;
+    color: #ff4444;
+}
+
+.days-left.overdue {
+    background: #ff4444;
+    color: white;
+}
+
+.days-left.current {
+    background: #fff9e5;
+    color: #ff8800;
+}
+
+.days-left.upcoming {
+    background: #e5f5ff;
+    color: #4499ff;
+}
+
+.complete-btn {
+    padding: 10px 16px;
+    background: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.3s;
+}
+
+.complete-btn:active {
+    background: #45a049;
+}
+
+.reminders {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #f0f0f0;
+}
+
+.reminders small {
+    color: #999;
+    font-size: 11px;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 30px;
+    color: #999;
+    font-style: italic;
+}
+
+/* SUBJECT CARDS */
+.subjects-list {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    padding: 15px;
+}
+
+.subject-card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.subject-card h4 {
+    font-size: 16px;
+    color: #333;
+    margin-bottom: 15px;
+}
+
+.subject-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+    margin-bottom: 15px;
+}
+
+.stat {
+    text-align: center;
+}
+
+.stat-value {
+    display: block;
+    font-size: 24px;
+    font-weight: bold;
+    color: #667eea;
+}
+
+.stat-label {
+    display: block;
+    font-size: 12px;
+    color: #999;
+    margin-top: 4px;
+}
+
+.progress-bar {
+    height: 8px;
+    background: #f0f0f0;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    transition: width 0.3s ease;
+}
+
+.progress-text {
+    font-size: 13px;
+    color: #666;
+    text-align: center;
+}
+
+.next-deadline {
+    font-size: 12px;
+    color: #ff6b6b;
+    text-align: center;
+    margin-top: 10px;
+    font-weight: 600;
+}
+
+/* RESPONSIVE */
+@media (max-width: 600px) {
+    .app-header h1 {
+        font-size: 20px;
+    }
+    
+    .task-footer {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .complete-btn {
+        width: 100%;
+    }
+}
+4.3 Конфигурация
+javascript// frontend/vite.config.js
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true
+      }
+    }
+  }
+})
+html<!-- frontend/index.html -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Мои дедлайны</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
+
+🚀 Шаг 5: Деплой (1 день)
+5.1 Backend на Railway
+bash# 1. Зарегистрироваться на railway.app
+# 2. Создать новый проект
+# 3. Добавить PostgreSQL из Marketplace
+# 4. Деплой backend:
+
+cd backend
+railway login
+railway init
+railway up
+
+# 5. Добавить переменные окружения в Railway Dashboard:
+# BOT_TOKEN=...
+# WEB_APP_URL=https://your-frontend.vercel.app
+5.2 Frontend на Vercel
+bashcd frontend
+npm install -g vercel
+vercel login
+vercel
+
+# При деплое указать:
+# Framework: Vite
+# Build Command: npm run build
+# Output Directory: dist
+5.3 Обновить URL в боте
+После деплоя frontend обновите WEB_APP_URL в Railway и в коде бота.
+
+✅ Шаг 6: Запуск и тестирование
+Локально:
+bash# Terminal 1 - Backend
+cd backend
+source venv/bin/activate
+python main.py
+
+# Terminal 2 - Frontend  
+cd frontend
+npm run dev
+
+# Terminal 3 - Бот
+cd backend
+python bot.py
+Production:
+
+Откройте бота в Telegram
+Отправьте /start
+Нажмите кнопку "Открыть дедлайны"
+Приложение откроется внутри Telegram
+
+
+📊 Итоговая временная шкала
+ЭтапВремяДействияНастройка окружения30 минBotFather, зависимостиБаза данных1 часСхема, загрузка данныхBackend API2-3 дняFastAPI, endpointsTelegram бот1 деньКоманды, напоминанияFrontend2-3 дняReact UIДеплой1 деньRailway + VercelИТОГО7-9 днейГотовое приложение
+
+🔑 Ключевые особенности
+✅ Без регистрации - Telegram ID используется автоматически
+✅ Автоматическая категоризация - задачи делятся по срочности
+✅ Напоминания в боте - уведомления за 15 и 5 дней
+✅ Два вида отображения - по задачам и по предметам
+✅ Прогресс по предметам - визуализация выполнения
+✅ Бесплатный хостинг - Railway + Vercel
+Готово к реализации! Начинайте с создания бота и БД, затем backend, и в конце frontend.
