@@ -22,12 +22,12 @@ Telegram Mini App для управления дедлайнами без рег
 1. Установите PostgreSQL
 2. Создайте базу данных:
 ```sql
-CREATE DATABASE telegram_tasks;
+CREATE DATABASE tasks;
 ```
 
 3. Выполните схему:
 ```bash
-psql -d telegram_tasks -f sql/init.sql
+psql -d tasks -f sql/init.sql
 ```
 
 ### 2. Backend
@@ -54,18 +54,18 @@ pip install -r requirements.txt
 4. Настройте переменные окружения в `config.py`:
 ```python
 BOT_TOKEN = 'your_bot_token_here'
-DATABASE_URL = 'postgresql://user:password@localhost:5432/telegram_tasks'
+DATABASE_URL = 'postgresql://postgres:postgres123@127.0.0.1:5432/tasks'
 WEB_APP_URL = 'https://your-app.vercel.app'
 ```
 
 5. Загрузите тестовые данные:
 ```bash
-python load_data.py
+python load_tasks.py
 ```
 
-6. Запустите API сервер:
+6. **Запустите API сервер:**
 ```bash
-python main.py
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 7. В отдельном терминале запустите бота:
@@ -85,10 +85,33 @@ cd frontend
 npm install
 ```
 
-3. Запустите dev сервер:
+3. **Запустите dev сервер:**
 ```bash
 npm run dev
 ```
+
+## 🚀 Быстрый запуск
+
+### Команды для запуска проекта:
+
+**Терминал 1 - Backend:**
+```bash
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Терминал 2 - Frontend:**
+```bash
+cd frontend
+npm run dev
+```
+
+**Откройте в браузере:** http://localhost:5173
+
+### Проверка работы:
+
+- **Backend API:** http://localhost:8000/docs
+- **Frontend:** http://localhost:5173
 
 ## 🤖 Настройка Telegram бота
 
